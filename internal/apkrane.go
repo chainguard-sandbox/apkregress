@@ -72,6 +72,8 @@ func (a *ApkraneClient) GetReverseDependencies(packageName string) ([]string, er
 	arch := runtime.GOARCH
 	if arch == "amd64" {
 		arch = "x86_64"
+	} else if arch == "arm64" {
+		arch = "aarch64"
 	}
 
 	indexURL := a.getIndexURL(arch)
