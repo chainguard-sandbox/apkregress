@@ -64,10 +64,10 @@ func TestGetIndexURL(t *testing.T) {
 			expectedURL: "https://packages.wolfi.dev/os/x86_64/APKINDEX.tar.gz",
 		},
 		{
-			name:        "wolfi arm64",
+			name:        "wolfi aarch64",
 			repoType:    "wolfi",
-			arch:        "arm64",
-			expectedURL: "https://packages.wolfi.dev/os/arm64/APKINDEX.tar.gz",
+			arch:        "aarch64",
+			expectedURL: "https://packages.wolfi.dev/os/aarch64/APKINDEX.tar.gz",
 		},
 		{
 			name:        "enterprise x86_64",
@@ -76,10 +76,10 @@ func TestGetIndexURL(t *testing.T) {
 			expectedURL: "https://apk.cgr.dev/chainguard-private/x86_64/APKINDEX.tar.gz",
 		},
 		{
-			name:        "enterprise arm64",
+			name:        "enterprise aarch64",
 			repoType:    "enterprise",
-			arch:        "arm64",
-			expectedURL: "https://apk.cgr.dev/chainguard-private/arm64/APKINDEX.tar.gz",
+			arch:        "aarch64",
+			expectedURL: "https://apk.cgr.dev/chainguard-private/aarch64/APKINDEX.tar.gz",
 		},
 		{
 			name:        "extras x86_64",
@@ -88,10 +88,10 @@ func TestGetIndexURL(t *testing.T) {
 			expectedURL: "https://apk.cgr.dev/extra-packages/x86_64/APKINDEX.tar.gz",
 		},
 		{
-			name:        "extras arm64",
+			name:        "extras aarch64",
 			repoType:    "extras",
-			arch:        "arm64",
-			expectedURL: "https://apk.cgr.dev/extra-packages/arm64/APKINDEX.tar.gz",
+			arch:        "aarch64",
+			expectedURL: "https://apk.cgr.dev/extra-packages/aarch64/APKINDEX.tar.gz",
 		},
 		{
 			name:        "default fallback to wolfi",
