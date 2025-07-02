@@ -12,7 +12,7 @@ A Go-based tool that uses apkrane to generate a list of reverse dependencies of 
 ## Requirements
 
 - Go 1.21+
-- `apkrane` command-line tool
+- [apkrane](https://github.com/jonjohnsonjr/apkrane) command-line tool
 - `make` command
 - For enterprise and extras repositories: `chainctl` command-line tool for authentication
 - Access to one of the supported repositories:
