@@ -278,62 +278,6 @@ func TestTestResult(t *testing.T) {
 	}
 }
 
-func TestWriteResultFiles(t *testing.T) {
-	// Create temporary directory
-	tmpDir, err := os.MkdirTemp("", "runner_test_")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	runner := &RegressionTestRunner{
-		logDir: tmpDir,
-	}
-
-	successful := []string{"pkg1", "pkg2"}
-	failed := []string{"pkg3"}
-	regressions := []string{"pkg4", "pkg5"}
-	hung := []string{"pkg6"}
-	skipped := []string{"pkg7", "pkg8", "pkg9"}
-
-	runner.writeResultFiles(successful, failed, regressions, hung, skipped)
-
-	// Check that files were created
-	files := map[string][]string{
-		"successful.txt":  successful,
-		"failed.txt":      failed,
-		"regressions.txt": regressions,
-		"hung.txt":        hung,
-		"skipped.txt":     skipped,
-	}
-
-	for filename, expectedContent := range files {
-		filePath := filepath.Join(tmpDir, filename)
-		
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			t.Errorf("Expected file %s to exist", filename)
-			continue
-		}
-
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			t.Errorf("Failed to read file %s: %v", filename, err)
-			continue
-		}
-
-		lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-		if len(expectedContent) == 0 {
-			if len(lines) == 1 && lines[0] == "" {
-				// Empty file is OK for empty content
-				continue
-			}
-		}
-
-		if !reflect.DeepEqual(lines, expectedContent) {
-			t.Errorf("File %s content mismatch. Expected %v, got %v", filename, expectedContent, lines)
-		}
-	}
-}
 
 func TestLogDirectoryCreation(t *testing.T) {
 	tests := []struct {
@@ -496,6 +440,203 @@ func TestProgressBoundaryConditions(t *testing.T) {
 				if runner.completedTests != originalCompleted {
 					t.Errorf("Expected completedTests to remain unchanged when over total")
 				}
+			}
+		})
+	}
+}
+
+func TestResultWriter(t *testing.T) {
+	// Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "result_writer_test_")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create ResultWriter
+	rw, err := NewResultWriter(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create ResultWriter: %v", err)
+	}
+	defer rw.Close()
+
+	// Test writing to different result files
+	testCases := []struct {
+		filename    string
+		packageName string
+	}{
+		{"successful.txt", "pkg1"},
+		{"successful.txt", "pkg2"},
+		{"failed.txt", "pkg3"},
+		{"regressions.txt", "pkg4"},
+		{"hung.txt", "pkg5"},
+		{"skipped.txt", "pkg6"},
+	}
+
+	// Write test results
+	for _, tc := range testCases {
+		err := rw.WriteResult(tc.filename, tc.packageName)
+		if err != nil {
+			t.Errorf("Failed to write result to %s: %v", tc.filename, err)
+		}
+	}
+
+	// Close writer to ensure all data is flushed
+	rw.Close()
+
+	// Verify file contents
+	expectedContents := map[string][]string{
+		"successful.txt":  {"pkg1", "pkg2"},
+		"failed.txt":      {"pkg3"},
+		"regressions.txt": {"pkg4"},
+		"hung.txt":        {"pkg5"},
+		"skipped.txt":     {"pkg6"},
+	}
+
+	for filename, expectedLines := range expectedContents {
+		filePath := filepath.Join(tmpDir, filename)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			t.Errorf("Failed to read file %s: %v", filename, err)
+			continue
+		}
+
+		lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+		if !reflect.DeepEqual(lines, expectedLines) {
+			t.Errorf("File %s content mismatch. Expected %v, got %v", filename, expectedLines, lines)
+		}
+	}
+}
+
+func TestWriteResultToFile(t *testing.T) {
+	// Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "write_result_test_")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create runner with ResultWriter
+	runner := &RegressionTestRunner{
+		logDir: tmpDir,
+	}
+
+	rw, err := NewResultWriter(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create ResultWriter: %v", err)
+	}
+	defer rw.Close()
+	runner.resultWriter = rw
+
+	testCases := []struct {
+		name             string
+		packageName      string
+		withRepoResult   TestResult
+		withoutRepoResult *TestResult
+		expectedFile     string
+		expectedLine     string
+	}{
+		{
+			name:        "successful test",
+			packageName: "pkg1",
+			withRepoResult: TestResult{
+				Package: "pkg1",
+				Success: true,
+				Skipped: false,
+				Hung:    false,
+			},
+			withoutRepoResult: nil,
+			expectedFile:     "successful.txt",
+			expectedLine:     "pkg1",
+		},
+		{
+			name:        "skipped test",
+			packageName: "pkg2",
+			withRepoResult: TestResult{
+				Package: "pkg2",
+				Success: false,
+				Skipped: true,
+				Hung:    false,
+			},
+			withoutRepoResult: nil,
+			expectedFile:     "skipped.txt",
+			expectedLine:     "pkg2",
+		},
+		{
+			name:        "regression detected",
+			packageName: "pkg3",
+			withRepoResult: TestResult{
+				Package: "pkg3",
+				Success: false,
+				Skipped: false,
+				Hung:    false,
+			},
+			withoutRepoResult: &TestResult{
+				Package: "pkg3",
+				Success: true,
+				Skipped: false,
+				Hung:    false,
+			},
+			expectedFile: "regressions.txt",
+			expectedLine: "pkg3",
+		},
+		{
+			name:        "failed in both scenarios",
+			packageName: "pkg4",
+			withRepoResult: TestResult{
+				Package: "pkg4",
+				Success: false,
+				Skipped: false,
+				Hung:    false,
+			},
+			withoutRepoResult: &TestResult{
+				Package: "pkg4",
+				Success: false,
+				Skipped: false,
+				Hung:    false,
+			},
+			expectedFile: "failed.txt",
+			expectedLine: "pkg4",
+		},
+		{
+			name:        "hung test with repo",
+			packageName: "pkg5",
+			withRepoResult: TestResult{
+				Package: "pkg5",
+				Success: false,
+				Skipped: false,
+				Hung:    true,
+			},
+			withoutRepoResult: nil,
+			expectedFile:     "hung.txt",
+			expectedLine:     "pkg5 (with repo)",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner.writeResultToFile(tc.packageName, &tc.withRepoResult, tc.withoutRepoResult)
+
+			// Check that the expected file was written
+			filePath := filepath.Join(tmpDir, tc.expectedFile)
+			content, err := os.ReadFile(filePath)
+			if err != nil {
+				t.Errorf("Failed to read file %s: %v", tc.expectedFile, err)
+				return
+			}
+
+			lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+			found := false
+			for _, line := range lines {
+				if line == tc.expectedLine {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				t.Errorf("Expected line '%s' not found in file %s. Content: %v", tc.expectedLine, tc.expectedFile, lines)
 			}
 		})
 	}
