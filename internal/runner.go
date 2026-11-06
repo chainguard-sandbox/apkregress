@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,102 @@ type TestResult struct {
 	Error    error
 	Hung     bool
 	Skipped  bool
+}
+
+type ResultWriter struct {
+	mu        sync.Mutex
+	files     map[string]*os.File
+	logDir    string
+}
+
+func NewResultWriter(logDir string) (*ResultWriter, error) {
+	rw := &ResultWriter{
+		files:  make(map[string]*os.File),
+		logDir: logDir,
+	}
+
+	// Create and open all result files for append
+	filenames := []string{"successful.txt", "failed.txt", "regressions.txt", "hung.txt", "skipped.txt"}
+	for _, filename := range filenames {
+		filepath := filepath.Join(logDir, filename)
+		file, err := os.OpenFile(filepath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			rw.Close() // Clean up already opened files
+			return nil, fmt.Errorf("failed to open %s: %w", filename, err)
+		}
+		rw.files[filename] = file
+	}
+
+	return rw, nil
+}
+
+func (rw *ResultWriter) WriteResult(filename, packageName string) error {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	file, exists := rw.files[filename]
+	if !exists {
+		return fmt.Errorf("file %s not found", filename)
+	}
+
+	_, err := file.WriteString(packageName + "\n")
+	if err != nil {
+		return err
+	}
+
+	return file.Sync() // Ensure data is written to disk
+}
+
+func (rw *ResultWriter) Close() {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	for _, file := range rw.files {
+		file.Close()
+	}
+}
+
+func (r *RegressionTestRunner) writeResultToFile(packageName string, withRepoResult, withoutRepoResult *TestResult) {
+	if r.resultWriter == nil {
+		return // ResultWriter not initialized yet
+	}
+
+	// Determine result type and write immediately
+	if withRepoResult.Skipped {
+		r.resultWriter.WriteResult("skipped.txt", packageName)
+		return
+	}
+
+	if withRepoResult.Hung {
+		r.resultWriter.WriteResult("hung.txt", fmt.Sprintf("%s (with repo)", packageName))
+		if withoutRepoResult != nil && withoutRepoResult.Hung {
+			r.resultWriter.WriteResult("hung.txt", fmt.Sprintf("%s (without repo)", packageName))
+		}
+		return
+	}
+
+	if withoutRepoResult != nil && withoutRepoResult.Hung {
+		r.resultWriter.WriteResult("hung.txt", fmt.Sprintf("%s (without repo)", packageName))
+		return
+	}
+
+	// If with-repo test passed and no without-repo test was run
+	if withRepoResult.Success && withoutRepoResult == nil {
+		r.resultWriter.WriteResult("successful.txt", packageName)
+		return
+	}
+
+	// If both tests were run because with-repo failed
+	if !withRepoResult.Success && withoutRepoResult != nil {
+		if withoutRepoResult.Success {
+			// Regression: fails with repo, passes without
+			r.resultWriter.WriteResult("regressions.txt", packageName)
+		} else {
+			// Failed in both scenarios
+			r.resultWriter.WriteResult("failed.txt", packageName)
+		}
+		return
+	}
 }
 
 type RegressionTestRunner struct {
@@ -41,6 +136,7 @@ type RegressionTestRunner struct {
 	completedTests int64
 	totalTests     int64
 	startTime      time.Time
+	resultWriter   *ResultWriter
 }
 
 func (r *RegressionTestRunner) updateProgress() {
@@ -105,6 +201,7 @@ func NewRegressionTestRunner(packageName, apkRepo, repoPath, repoType string, co
 		markdownOutput: markdownOutput,
 		apkrane:        NewApkraneClient(verbose, repoType),
 		melange:        NewMelangeClient(repoPath, verbose, logDir, hangTimeout),
+		resultWriter:   nil, // Will be initialized in Run()
 	}
 }
 
@@ -130,6 +227,7 @@ func NewRegressionTestRunnerFromPackageList(packages []string, apkRepo, repoPath
 		markdownOutput: markdownOutput,
 		apkrane:        NewApkraneClient(verbose, repoType),
 		melange:        NewMelangeClient(repoPath, verbose, logDir, hangTimeout),
+		resultWriter:   nil, // Will be initialized in Run()
 	}
 }
 
@@ -138,6 +236,14 @@ func (r *RegressionTestRunner) Run() error {
 	if err := os.MkdirAll(r.logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory %s: %w", r.logDir, err)
 	}
+
+	// Initialize result writer for real-time file updates
+	var err error
+	r.resultWriter, err = NewResultWriter(r.logDir)
+	if err != nil {
+		return fmt.Errorf("failed to create result writer: %w", err)
+	}
+	defer r.resultWriter.Close()
 
 	reverseDeps, err := r.apkrane.GetReverseDependencies(r.packageName)
 	if err != nil {
@@ -181,17 +287,20 @@ func (r *RegressionTestRunner) Run() error {
 			}
 			results <- withRepoResult
 
+			var withoutRepoResult *TestResult
+
 			// Only test without repo if test with repo failed and wasn't skipped
 			if !withRepoResult.Success && !withRepoResult.Skipped {
 				err := r.melange.TestPackage(packageName, false, r.apkRepo)
 
 				// Skip if YAML file not found (shouldn't happen since we already checked, but for safety)
 				if errors.Is(err, ErrPackageYAMLNotFound) {
+					r.writeResultToFile(packageName, &withRepoResult, nil)
 					r.updateProgress()
 					return
 				}
 
-				results <- TestResult{
+				withoutRepoTestResult := TestResult{
 					Package:  packageName,
 					WithRepo: false,
 					Success:  err == nil,
@@ -199,7 +308,12 @@ func (r *RegressionTestRunner) Run() error {
 					Hung:     errors.Is(err, ErrTestHung),
 					Skipped:  errors.Is(err, ErrPackageYAMLNotFound),
 				}
+				withoutRepoResult = &withoutRepoTestResult
+				results <- withoutRepoTestResult
 			}
+
+			// Write result to file immediately
+			r.writeResultToFile(packageName, &withRepoResult, withoutRepoResult)
 
 			// Update progress after completing all tests for this package
 			r.updateProgress()
@@ -219,6 +333,14 @@ func (r *RegressionTestRunner) RunFromPackageList(packages []string) error {
 	if err := os.MkdirAll(r.logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory %s: %w", r.logDir, err)
 	}
+
+	// Initialize result writer for real-time file updates
+	var err error
+	r.resultWriter, err = NewResultWriter(r.logDir)
+	if err != nil {
+		return fmt.Errorf("failed to create result writer: %w", err)
+	}
+	defer r.resultWriter.Close()
 
 	if len(packages) == 0 {
 		fmt.Println("No packages provided")
@@ -257,17 +379,20 @@ func (r *RegressionTestRunner) RunFromPackageList(packages []string) error {
 			}
 			results <- withRepoResult
 
+			var withoutRepoResult *TestResult
+
 			// Only test without repo if test with repo failed and wasn't skipped
 			if !withRepoResult.Success && !withRepoResult.Skipped {
 				err := r.melange.TestPackage(packageName, false, r.apkRepo)
 
 				// Skip if YAML file not found (shouldn't happen since we already checked, but for safety)
 				if errors.Is(err, ErrPackageYAMLNotFound) {
+					r.writeResultToFile(packageName, &withRepoResult, nil)
 					r.updateProgress()
 					return
 				}
 
-				results <- TestResult{
+				withoutRepoTestResult := TestResult{
 					Package:  packageName,
 					WithRepo: false,
 					Success:  err == nil,
@@ -275,7 +400,12 @@ func (r *RegressionTestRunner) RunFromPackageList(packages []string) error {
 					Hung:     errors.Is(err, ErrTestHung),
 					Skipped:  errors.Is(err, ErrPackageYAMLNotFound),
 				}
+				withoutRepoResult = &withoutRepoTestResult
+				results <- withoutRepoTestResult
 			}
+
+			// Write result to file immediately
+			r.writeResultToFile(packageName, &withRepoResult, withoutRepoResult)
 
 			// Update progress after completing all tests for this package
 			r.updateProgress()
@@ -368,9 +498,6 @@ func (r *RegressionTestRunner) analyzeResults(results chan TestResult, expectedP
 		}
 	}
 
-	// Generate result files
-	r.writeResultFiles(successfulPackages, failedPackages, regressions, hungTests, skippedPackages)
-
 	if r.markdownOutput {
 		r.printMarkdownSummary(expectedPackages, skippedCount, len(packageResults)-skippedCount, len(regressions), len(hungTests), successCount, failureCount, regressions, hungTests)
 	} else {
@@ -453,24 +580,3 @@ func (r *RegressionTestRunner) printMarkdownSummary(totalPackages, skippedCount,
 	fmt.Printf("*Generated by apk-regression-test-runner*\n")
 }
 
-func (r *RegressionTestRunner) writeResultFiles(successful, failed, regressions, hung, skipped []string) {
-	files := map[string][]string{
-		"successful.txt":  successful,
-		"failed.txt":      failed,
-		"regressions.txt": regressions,
-		"hung.txt":        hung,
-		"skipped.txt":     skipped,
-	}
-
-	for filename, packages := range files {
-		filePath := filepath.Join(r.logDir, filename)
-		content := strings.Join(packages, "\n")
-		if content != "" {
-			content += "\n"
-		}
-
-		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			fmt.Printf("Warning: failed to write %s: %v\n", filename, err)
-		}
-	}
-}
